@@ -60,32 +60,35 @@ fn fbm2(p_in: vec2<f32>) -> f32 {
     return v;
 }
 
-// One continuous, softly flowing aurora curtain.
+// One softly flowing aurora curtain (vertical wavy drapery that drifts/snakes).
 //   seed     : decorrelates this curtain from the others
 //   baseEdge : nominal height of its (wavy) lower edge
 //   depth    : 0 = front (brighter/faster), higher = back
 fn curtain(p: vec2<f32>, t: f32, seed: f32, baseEdge: f32, depth: f32) -> vec3<f32> {
-    // Smooth flowing horizontal warp. Depends mostly on height so the whole
-    // curtain leans/sways as one body; animated so the waves travel.
+    // Horizontal warp built from pure sines (no creases). Several height
+    // frequencies make each curtain snake left/right multiple times.
     let flow =
-        0.10 * sin(p.y * 2.0 + t * 0.5 + seed)
-        + 0.06 * sin(p.y * 3.3 - t * 0.7 + seed * 2.0)
-        + 0.14 * (fbm2(vec2<f32>(p.y * 0.9 + seed, t * 0.08)) - 0.5);
+        0.18 * sin(p.y * 3.0 + t * 0.5 + seed)
+        + 0.11 * sin(p.y * 5.5 - t * 0.7 + seed * 2.0)
+        + 0.06 * sin(p.y * 9.0 + t * 1.0 + seed * 3.3);
     let xw = p.x * (0.9 + 0.12 * depth) + t * (0.025 + 0.015 * depth) + flow + seed * 3.0;
+
+    let cov = 0.375 + 0.05 * sin(t * 0.13) + 0.025 * sin(t * 0.31 + 1.0);
+    let lo = mix(0.58, 0.30, clamp((cov - 0.30) / 0.30, 0.0, 1.0));
 
     // Soft vertical filaments (no hard ridges) — some columns brighter, gaps
     // fade smoothly so the black sky shows through without sharp borders.
-    let streak = fbm2(vec2<f32>(xw * 3.0, seed * 5.0 + t * 0.04));
-    let rays = smoothstep(0.30, 0.72, streak);
+    let body = fbm2(vec2<f32>(xw * 3.0, p.y * 0.5 + seed * 5.0 + t * 0.04));
+    let rays = smoothstep(lo, lo + 0.38, body);
 
-    // Gently waving lower edge of the ribbon.
+    // Gently waving lower edge of the ribbon (sines only).
     let edge = baseEdge
-        + 0.10 * sin(xw * 1.2 + t * 0.3 + seed)
-        + 0.08 * (fbm2(vec2<f32>(xw * 0.6, t * 0.05 + seed)) - 0.5);
+        + 0.09 * sin(xw * 1.2 + t * 0.3 + seed)
+        + 0.05 * sin(xw * 2.3 - t * 0.2 + seed * 1.7);
     let hh = p.y - edge;
 
-    // Soft bottom (smoothstep, not a hard clamp) + long exponential fade up.
-    let topLen = 0.5;
+    // Soft bottom + exponential fade up.
+    let topLen = 0.36;
     let vprofile = smoothstep(-0.06, 0.05, hh) * exp(-max(hh, 0.0) / topLen);
 
     let pulse = 0.78 + 0.22 * sin(t * 0.6 + xw * 0.5 + seed);
@@ -104,9 +107,11 @@ fn curtain(p: vec2<f32>, t: f32, seed: f32, baseEdge: f32, depth: f32) -> vec3<f
 
 fn aurora_sky(p: vec2<f32>, t: f32) -> vec3<f32> {
     var c = vec3<f32>(0.0);
-    c = c + curtain(p, t, 0.0, 0.34, 0.0);
-    c = c + curtain(p, t, 1.7, 0.44, 1.0);
-    c = c + curtain(p, t, 3.9, 0.28, 2.0);
+    // Slow everything down: feed the curtains a half-speed clock.
+    let ts = t * 0.5;
+    c = c + curtain(p, ts, 0.0, 0.34, 0.0);
+    c = c + curtain(p, ts, 1.7, 0.44, 1.0);
+    c = c + curtain(p, ts, 3.9, 0.28, 2.0);
 
     // White-hot cores where the brightest filaments stack up.
     let lum = max(c.r, max(c.g, c.b));
@@ -122,24 +127,34 @@ fn starfield(p: vec2<f32>, t: f32) -> vec3<f32> {
     return vec3<f32>(twinkle * flicker) * smoothstep(0.15, 0.5, p.y);
 }
 
-// Silhouette top height of a row of pine trees at horizontal position x.
+// Silhouette top height of a row of Christmas trees at horizontal position x.
+// Each tree is built from stacked triangular tiers (widest at the bottom,
+// pointed at the top) for the classic conifer look.
 fn pines(x: f32) -> f32 {
     var top = 0.0;
-    for (var k = 0.0; k < 7.0; k = k + 1.0) {
-        let cx = hash21(vec2<f32>(k, 1.0)) * 2.0;          // across screen (0..2)
-        let h = 0.13 + 0.10 * hash21(vec2<f32>(k, 2.0));   // tree height
-        let w = 0.030 + 0.020 * hash21(vec2<f32>(k, 3.0)); // half-width at base
-        let base = 0.045 + 0.025 * hash21(vec2<f32>(k, 4.0));
+    for (var k = 0.0; k < 16.0; k = k + 1.0) {
+        let cx = hash21(vec2<f32>(k, 1.0)) * 2.0;            // across screen (0..2)
+        let h = 0.0375 + 0.025 * hash21(vec2<f32>(k, 2.0)); // tree height
+        let w = 0.011 + 0.006 * hash21(vec2<f32>(k, 3.0)); // half-width at base
+        // Stand each tree on the ridge line at its position so small trees
+        // still poke above the mountain silhouette.
+        let rfar = 0.10 + 0.04 * fbm2(vec2<f32>(cx * 1.3 + 20.0, 0.0));
+        let rnear = 0.05 + 0.05 * fbm2(vec2<f32>(cx * 0.8 + 50.0, 0.0));
+        let base = max(rfar, rnear) - 0.005;
         let d = abs(x - cx);
-        if (d < w) {
-            let dn = d / w;                 // 0 at trunk, 1 at edge
-            // Conical fir profile with a little branch wobble on the edge.
-            let g = (1.0 - dn) + 0.08 * sin(dn * 22.0) * (1.0 - dn);
-            top = max(top, base + h * g);
+
+        // Three overlapping tiers, each higher up and narrower than the last.
+        for (var s = 0.0; s < 3.0; s = s + 1.0) {
+            let wj = w * (1.0 - 0.27 * s);
+            let basej = base + h * 0.26 * s;
+            let apexj = basej + h * 0.5;
+            if (d < wj) {
+                top = max(top, basej + (apexj - basej) * (1.0 - d / wj));
+            }
         }
         // Thin trunk poking down to the ground.
-        if (abs(x - cx) < 0.004) {
-            top = max(top, base + 0.02);
+        if (d < 0.00125) {
+            top = max(top, base + 0.01);
         }
     }
     return top;
@@ -175,8 +190,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // High-contrast exposure tonemap. Output is LINEAR (sRGB surface encodes).
     col = vec3<f32>(1.0) - exp(-col * 1.3);
 
-    // Dither to break up 8-bit banding in the dark sky.
-    let dither = (hash21(in.uv * u.resolution) - 0.5) / 255.0;
+    // Triangular-PDF dither (sum of two hashes) to break up 8-bit banding in
+    // the smooth sky/aurora gradients — better than a single uniform sample.
+    let d1 = hash21(in.uv * u.resolution);
+    let d2 = hash21(in.uv * u.resolution + 19.7);
+    let dither = (d1 + d2 - 1.0) / 255.0;
     col = col + vec3<f32>(dither);
     return vec4<f32>(col, 1.0);
 }

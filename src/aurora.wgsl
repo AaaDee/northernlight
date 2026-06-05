@@ -1,10 +1,11 @@
-// Aurora matching a near-black night sky with intense green curtains, after a
-// frame from an aurora timelapse: vivid green ribbons sweeping diagonally with
-// white-hot cores, vertical ray striations, a mountain ridge, faint stars.
-// High contrast, sky crushed to near-black.
+// Aurora as a few whole, continuously flowing curtains over a near-black sky.
 //
-// Motion: each curtain layer drifts sideways (parallax), its baseline meanders
-// like a rippling ribbon, rays flicker/pulse, and bands sweep diagonally.
+// Each curtain is ONE soft ribbon: a smoothly waving lower edge, soft vertical
+// filaments, and a long upward fade — green body shading to pink at the top
+// edge (as in the reference photos). A height-dependent horizontal "flow" warps
+// each curtain so it sways as a single organic object. No hard edges, no
+// per-layer baseline streaks (which previously read as horizontal scan lines).
+// Foreground: dark mountain ridge with a row of pine-tree silhouettes.
 
 struct Uniforms {
     resolution: vec2<f32>,
@@ -38,9 +39,7 @@ fn hash21(p_in: vec2<f32>) -> f32 {
 fn noise2(p: vec2<f32>) -> f32 {
     let i = floor(p);
     let f = fract(p);
-    // Quintic interpolant (C2-continuous). Cubic smoothstep leaves a 2nd-
-    // derivative kink at every cell boundary which, because this noise warps
-    // the ray positions, shows up as horizontal creases across the frame.
+    // Quintic interpolant (C2-continuous) for smooth, crease-free noise.
     let w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
     let a = hash21(i);
     let b = hash21(i + vec2<f32>(1.0, 0.0));
@@ -61,70 +60,58 @@ fn fbm2(p_in: vec2<f32>) -> f32 {
     return v;
 }
 
-// Accumulated aurora colour for sky point p (p.y: 0 = horizon, 1 = zenith).
+// One continuous, softly flowing aurora curtain.
+//   seed     : decorrelates this curtain from the others
+//   baseEdge : nominal height of its (wavy) lower edge
+//   depth    : 0 = front (brighter/faster), higher = back
+fn curtain(p: vec2<f32>, t: f32, seed: f32, baseEdge: f32, depth: f32) -> vec3<f32> {
+    // Smooth flowing horizontal warp. Depends mostly on height so the whole
+    // curtain leans/sways as one body; animated so the waves travel.
+    let flow =
+        0.10 * sin(p.y * 2.0 + t * 0.5 + seed)
+        + 0.06 * sin(p.y * 3.3 - t * 0.7 + seed * 2.0)
+        + 0.14 * (fbm2(vec2<f32>(p.y * 0.9 + seed, t * 0.08)) - 0.5);
+    let xw = p.x * (0.9 + 0.12 * depth) + t * (0.025 + 0.015 * depth) + flow + seed * 3.0;
+
+    // Soft vertical filaments (no hard ridges) — some columns brighter, gaps
+    // fade smoothly so the black sky shows through without sharp borders.
+    let streak = fbm2(vec2<f32>(xw * 3.0, seed * 5.0 + t * 0.04));
+    let rays = smoothstep(0.30, 0.72, streak);
+
+    // Gently waving lower edge of the ribbon.
+    let edge = baseEdge
+        + 0.10 * sin(xw * 1.2 + t * 0.3 + seed)
+        + 0.08 * (fbm2(vec2<f32>(xw * 0.6, t * 0.05 + seed)) - 0.5);
+    let hh = p.y - edge;
+
+    // Soft bottom (smoothstep, not a hard clamp) + long exponential fade up.
+    let topLen = 0.5;
+    let vprofile = smoothstep(-0.06, 0.05, hh) * exp(-max(hh, 0.0) / topLen);
+
+    let pulse = 0.78 + 0.22 * sin(t * 0.6 + xw * 0.5 + seed);
+    let intensity = rays * vprofile * pulse;
+
+    // Green body -> pink/magenta upper edge.
+    let frac = clamp(hh / topLen, 0.0, 1.0);
+    let green = vec3<f32>(0.10, 1.0, 0.20);
+    let lime = vec3<f32>(0.40, 1.0, 0.40);
+    let pink = vec3<f32>(1.0, 0.30, 0.70);
+    var col = mix(green, lime, smoothstep(0.0, 0.30, frac));
+    col = mix(col, pink, 0.8 * smoothstep(0.5, 1.0, frac));
+
+    return col * intensity / (1.0 + depth * 0.4);
+}
+
 fn aurora_sky(p: vec2<f32>, t: f32) -> vec3<f32> {
-    var acc = vec3<f32>(0.0);
-    // Pure-green palette (almost no blue) so cores read green, not teal.
-    let green = vec3<f32>(0.10, 1.0, 0.18);
-    let lime = vec3<f32>(0.30, 1.0, 0.30);
-    let pink = vec3<f32>(1.0, 0.25, 0.65);
+    var c = vec3<f32>(0.0);
+    c = c + curtain(p, t, 0.0, 0.34, 0.0);
+    c = c + curtain(p, t, 1.7, 0.44, 1.0);
+    c = c + curtain(p, t, 3.9, 0.28, 2.0);
 
-    for (var i = 0.0; i < 4.0; i = i + 1.0) {
-        // Sideways drift (alternating per layer) -> parallax.
-        let dir = select(1.0, -1.0, (i % 2.0) < 0.5);
-        let scroll = t * (0.03 + 0.02 * i) * dir;
-        let xx = p.x * (1.0 + 0.2 * i) + scroll;
-
-        // Diagonal sweep + meandering baseline (the rippling ribbon edge).
-        let slope = (i - 1.0) * 0.06;
-        let baseY = 0.30 + 0.10 * i
-            + p.x * slope
-            + 0.10 * (fbm2(vec2<f32>(xx * 0.5, i * 3.7)) - 0.5)
-            + 0.03 * sin(p.x * 2.0 + t * 0.4 + i);
-
-        let h = p.y - baseY;
-
-        // Horizontal sway that grows with height so curtains bend and flow into
-        // wavy ribbons instead of straight columns. Driven by height + time so
-        // the waves travel/undulate.
-        let sway = (0.10 + 0.18 * h) * sin(p.y * 2.6 + t * 0.6 + i * 2.0)
-            + 0.22 * (fbm2(vec2<f32>(p.y * 1.6 + t * 0.12, i * 5.0 + 9.0)) - 0.5);
-        let cx = xx + sway;
-
-        // SPARSE, SHARP, FINE vertical rays: warp x so rays meander, take a
-        // triangle ridge for crisp filaments, then pick only some ridges
-        // (gaps -> the black sky shows through between curtains).
-        let warp = fbm2(vec2<f32>(cx * 0.7 + t * 0.05, i * 2.0));
-        let q = cx * 3.2 + warp * 1.6;
-        let ridge = 1.0 - abs(fract(q) - 0.5) * 2.0;
-        // Lower threshold -> more ridges lit -> aurora covers more of the sky.
-        let pick = smoothstep(0.30, 0.80, fbm2(vec2<f32>(floor(q) * 0.35, i * 1.7)));
-        let ray = pow(max(ridge, 0.0), 6.0) * pick;
-
-        // Vertical profile: bright sharp bottom edge, fade upward. Longer rays
-        // reach higher up the sky.
-        let topLen = 0.30 + 0.35 * fbm2(vec2<f32>(xx * 1.2 + 5.0, i));
-        let vert = clamp(h / 0.015, 0.0, 1.0) * exp(-max(h, 0.0) / topLen);
-
-        // Thin bright band hugging the baseline (the concentrated streak).
-        let band = exp(-(h * h) / 0.0015);
-
-        let pulse = 0.7 + 0.3 * sin(t * 0.8 + i + xx * 0.7);
-        let intensity = (ray * vert * 2.6 + band * ray * 1.2) * pulse;
-
-        // Colour ramps with height: green body fading to pink/magenta at the
-        // upper edges, as in the reference photos.
-        let frac = clamp(h / topLen, 0.0, 1.0);
-        var col = mix(green, lime, smoothstep(0.0, 0.35, frac));
-        col = mix(col, pink, 0.85 * smoothstep(0.5, 1.0, frac));
-
-        acc = acc + col * intensity / (1.0 + i * 0.4);
-    }
-
-    // White-hot cores where rays stack up brightest.
-    let lum = max(acc.r, max(acc.g, acc.b));
-    acc = acc + vec3<f32>(1.0) * smoothstep(1.7, 3.0, lum) * 0.7;
-    return acc;
+    // White-hot cores where the brightest filaments stack up.
+    let lum = max(c.r, max(c.g, c.b));
+    c = c + vec3<f32>(1.0) * smoothstep(1.7, 3.0, lum) * 0.6;
+    return c;
 }
 
 fn starfield(p: vec2<f32>, t: f32) -> vec3<f32> {
@@ -135,6 +122,29 @@ fn starfield(p: vec2<f32>, t: f32) -> vec3<f32> {
     return vec3<f32>(twinkle * flicker) * smoothstep(0.15, 0.5, p.y);
 }
 
+// Silhouette top height of a row of pine trees at horizontal position x.
+fn pines(x: f32) -> f32 {
+    var top = 0.0;
+    for (var k = 0.0; k < 7.0; k = k + 1.0) {
+        let cx = hash21(vec2<f32>(k, 1.0)) * 2.0;          // across screen (0..2)
+        let h = 0.13 + 0.10 * hash21(vec2<f32>(k, 2.0));   // tree height
+        let w = 0.030 + 0.020 * hash21(vec2<f32>(k, 3.0)); // half-width at base
+        let base = 0.045 + 0.025 * hash21(vec2<f32>(k, 4.0));
+        let d = abs(x - cx);
+        if (d < w) {
+            let dn = d / w;                 // 0 at trunk, 1 at edge
+            // Conical fir profile with a little branch wobble on the edge.
+            let g = (1.0 - dn) + 0.08 * sin(dn * 22.0) * (1.0 - dn);
+            top = max(top, base + h * g);
+        }
+        // Thin trunk poking down to the ground.
+        if (abs(x - cx) < 0.004) {
+            top = max(top, base + 0.02);
+        }
+    }
+    return top;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let aspect = u.resolution.x / u.resolution.y;
@@ -142,8 +152,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let p = vec2<f32>(in.uv.x * aspect, 1.0 - in.uv.y);
     let t = u.time;
 
-    // Near-black night sky (these are linear values; the sRGB surface applies
-    // gamma on write, so keep them tiny).
+    // Near-black night sky (linear values; sRGB surface applies gamma).
     let horizon = vec3<f32>(0.004, 0.008, 0.018);
     let zenith = vec3<f32>(0.0, 0.001, 0.004);
     var col = mix(horizon, zenith, clamp(p.y, 0.0, 1.0));
@@ -152,20 +161,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     col = col + aurora_sky(p, t);
 
     // Mountain ridge silhouette.
-    let far = 0.11 + 0.045 * fbm2(vec2<f32>(p.x * 1.3 + 20.0, 0.0));
-    let near = 0.06 + 0.06 * fbm2(vec2<f32>(p.x * 0.8 + 50.0, 0.0));
+    let far = 0.10 + 0.04 * fbm2(vec2<f32>(p.x * 1.3 + 20.0, 0.0));
+    let near = 0.05 + 0.05 * fbm2(vec2<f32>(p.x * 0.8 + 50.0, 0.0));
     let ridge = max(far, near);
 
-    if (p.y < ridge) {
-        col = vec3<f32>(0.0, 0.002, 0.004);
+    // Pine trees stand on the ridge line.
+    let trees = pines(p.x);
+    let ground = max(ridge, trees);
+    if (p.y < ground) {
+        col = vec3<f32>(0.0, 0.001, 0.002);
     }
 
-    // High-contrast exposure tonemap. Output is LINEAR — the sRGB surface
-    // applies gamma encoding on write, so we must NOT gamma-correct here
-    // (doing both was washing the darks into a grey haze).
+    // High-contrast exposure tonemap. Output is LINEAR (sRGB surface encodes).
     col = vec3<f32>(1.0) - exp(-col * 1.3);
 
-    // Ordered-ish dither to break up 8-bit banding in the dark sky gradient.
+    // Dither to break up 8-bit banding in the dark sky.
     let dither = (hash21(in.uv * u.resolution) - 0.5) / 255.0;
     col = col + vec3<f32>(dither);
     return vec4<f32>(col, 1.0);

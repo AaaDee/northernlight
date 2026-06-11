@@ -52,9 +52,12 @@ fn fbm2(p_in: vec2<f32>) -> f32 {
     var v = 0.0;
     var amp = 0.5;
     var p = p_in;
+    // Rotate (and scale x2) each octave so value-noise cell boundaries never
+    // line up into axis-aligned horizontal seams across the frame.
+    let m = mat2x2<f32>(1.6, 1.2, -1.2, 1.6);
     for (var i = 0; i < 5; i = i + 1) {
         v = v + amp * noise2(p);
-        p = p * 2.0;
+        p = m * p;
         amp = amp * 0.5;
     }
     return v;
@@ -78,7 +81,9 @@ fn curtain(p: vec2<f32>, t: f32, seed: f32, baseEdge: f32, depth: f32) -> vec3<f
 
     // Soft vertical filaments (no hard ridges) — some columns brighter, gaps
     // fade smoothly so the black sky shows through without sharp borders.
-    let body = fbm2(vec2<f32>(xw * 3.0, p.y * 0.5 + seed * 5.0 + t * 0.04));
+    // The vertical coordinate depends on xw too, so any noise iso-line follows
+    // the wavy curtain instead of forming a flat horizontal seam mid-frame.
+    let body = fbm2(vec2<f32>(xw * 3.0, xw * 0.6 + p.y * 0.5 + seed * 5.0 + t * 0.04));
     let rays = smoothstep(lo, lo + 0.38, body);
 
     // Gently waving lower edge of the ribbon (sines only).

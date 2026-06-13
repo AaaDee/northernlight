@@ -1,10 +1,11 @@
 // Aurora as a few whole, continuously flowing curtains over a near-black sky.
 //
 // Each curtain is ONE soft ribbon: a smoothly waving lower edge, soft vertical
-// filaments, and a long upward fade — green body shading to pink at the top
-// edge (as in the reference photos). A height-dependent horizontal "flow" warps
-// each curtain so it sways as a single organic object.
+// filaments, and a long upward fade — green body shading through lime to a
+// pink/magenta top. A height-dependent horizontal "flow" warps each curtain
+// so it sways as a single organic object.
 // Foreground: dark mountain ridge with a row of pine-tree silhouettes.
+// All look/tuning knobs are grouped in the constants block below.
 
 struct Uniforms {
     resolution: vec2<f32>,
@@ -13,6 +14,26 @@ struct Uniforms {
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
+
+// ---- Look & tuning constants -----------------------------------------------
+// The whole "look" lives here so it can be tuned in one place instead of
+// hunting for literals at their use sites.
+
+// Post-processing
+const AURORA_GAIN    = 3.0;   // brightness multiplier on the aurora layer
+const EXPOSURE       = 1.3;   // tonemap exposure: 1 - exp(-col * EXPOSURE)
+const CONTRAST       = 1.1;   // S-curve strength around CONTRAST_PIVOT
+const CONTRAST_PIVOT = 0.25;  // value the contrast curve pivots about
+
+// Sky & ground (linear values; the sRGB surface applies gamma on present)
+const SKY_HORIZON  = vec3<f32>(0.012, 0.022, 0.050);
+const SKY_ZENITH   = vec3<f32>(0.002, 0.006, 0.016);
+const GROUND_COLOR = vec3<f32>(0.004, 0.008, 0.016);
+
+// Curtain palette: green body shading up through lime to a pink/magenta top
+const COL_GREEN = vec3<f32>(0.10, 1.0, 0.20);
+const COL_LIME  = vec3<f32>(0.40, 1.0, 0.40);
+const COL_PINK  = vec3<f32>(1.0, 0.30, 0.70);
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -68,8 +89,8 @@ fn fbm2(p_in: vec2<f32>) -> f32 {
     var v = 0.0;
     var amp = 0.5;
     var p = p_in;
-    // Rotate (and scale x2) each octave so value-noise cell boundaries never
-    // line up into axis-aligned horizontal seams across the frame.
+    // Rotate (and scale x2) each octave so successive octaves never line up
+    // into axis-aligned seams across the frame.
     let m = mat2x2<f32>(1.6, 1.2, -1.2, 1.6);
     for (var i = 0; i < 5; i = i + 1) {
         v = v + amp * noise2(p);
@@ -117,12 +138,8 @@ fn curtain(p: vec2<f32>, t: f32, seed: f32, baseEdge: f32, depth: f32) -> vec3<f
 
     // Green body -> pink/magenta upper edge.
     let frac = clamp(hh / topLen, 0.0, 1.0);
-    let green = vec3<f32>(0.10, 1.0, 0.20);
-    let lime = vec3<f32>(0.40, 1.0, 0.40);
-    let pink = vec3<f32>(1.0, 0.30, 0.70);
-
-    var col = mix(green, lime, smoothstep(0.0, 0.30, frac));
-    col = mix(col, pink, 0.8 * smoothstep(0.5, 1.0, frac));
+    var col = mix(COL_GREEN, COL_LIME, smoothstep(0.0, 0.30, frac));
+    col = mix(col, COL_PINK, 0.8 * smoothstep(0.5, 1.0, frac));
 
     return col * intensity / (1.0 + depth * 0.4);
 }
@@ -149,6 +166,14 @@ fn starfield(p: vec2<f32>, t: f32) -> vec3<f32> {
     return vec3<f32>(twinkle * flicker) * smoothstep(0.15, 0.5, p.y);
 }
 
+// Height of the layered mountain ridge silhouette at horizontal position x.
+// Two octaves of fbm (a far and a near range) max'd together.
+fn ridge_height(x: f32) -> f32 {
+    let far = 0.10 + 0.04 * fbm2(vec2<f32>(x * 1.3 + 20.0, 0.0));
+    let near = 0.05 + 0.05 * fbm2(vec2<f32>(x * 0.8 + 50.0, 0.0));
+    return max(far, near);
+}
+
 // Silhouette top height of a row of Christmas trees at horizontal position x.
 // Each tree is built from stacked triangular tiers (widest at the bottom,
 // pointed at the top) for the classic conifer look.
@@ -160,9 +185,7 @@ fn pines(x: f32) -> f32 {
         let w = 0.011 + 0.006 * hash21(vec2<f32>(k, 3.0)); // half-width at base
         // Stand each tree on the ridge line at its position so small trees
         // still poke above the mountain silhouette.
-        let rfar = 0.10 + 0.04 * fbm2(vec2<f32>(cx * 1.3 + 20.0, 0.0));
-        let rnear = 0.05 + 0.05 * fbm2(vec2<f32>(cx * 0.8 + 50.0, 0.0));
-        let base = max(rfar, rnear) - 0.005;
+        let base = ridge_height(cx) - 0.005;
         let d = abs(x - cx);
 
         // Three overlapping tiers, each higher up and narrower than the last.
@@ -189,35 +212,26 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let p = vec2<f32>(in.uv.x * aspect, 1.0 - in.uv.y);
     let t = u.time;
 
-    // Night sky (linear values; sRGB surface applies gamma). Lifted off pure
-    // black so it survives the contrast curve and reads as a deep blue dusk.
-    let horizon = vec3<f32>(0.012, 0.022, 0.050);
-    let zenith = vec3<f32>(0.002, 0.006, 0.016);
-    var col = mix(horizon, zenith, clamp(p.y, 0.0, 1.0));
+    // Night sky, lifted off pure black so it survives the contrast curve and
+    // reads as a deep blue dusk.
+    var col = mix(SKY_HORIZON, SKY_ZENITH, clamp(p.y, 0.0, 1.0));
 
     col = col + starfield(p, t);
-    col = col + aurora_sky(p, t) * 3.0;
+    col = col + aurora_sky(p, t) * AURORA_GAIN;
 
-    // Mountain ridge silhouette.
-    let far = 0.10 + 0.04 * fbm2(vec2<f32>(p.x * 1.3 + 20.0, 0.0));
-    let near = 0.05 + 0.05 * fbm2(vec2<f32>(p.x * 0.8 + 50.0, 0.0));
-    let ridge = max(far, near);
-
-    // Pine trees stand on the ridge line.
-    let trees = pines(p.x);
-    let ground = max(ridge, trees);
+    // Mountain ridge with pine trees standing on it.
+    let ground = max(ridge_height(p.x), pines(p.x));
     if (p.y < ground) {
-        col = vec3<f32>(0.004, 0.008, 0.016);
+        col = GROUND_COLOR;
     }
 
     // High-contrast exposure tonemap. Output is LINEAR (sRGB surface encodes).
-    col = vec3<f32>(1.0) - exp(-col * 1.3);
+    col = vec3<f32>(1.0) - exp(-col * EXPOSURE);
 
     // Contrast S-curve. Low pivot so the bright aurora gains punch without
     // crushing the dark sky/ground down to flat black.
-    let contrast = 1.1;
-    let pivot = 0.25;
-    col = clamp((col - vec3<f32>(pivot)) * contrast + vec3<f32>(pivot), vec3<f32>(0.0), vec3<f32>(1.0));
+    col = clamp((col - vec3<f32>(CONTRAST_PIVOT)) * CONTRAST + vec3<f32>(CONTRAST_PIVOT),
+                vec3<f32>(0.0), vec3<f32>(1.0));
 
     // Triangular-PDF dither (sum of two hashes) to break up 8-bit banding in
     // the smooth sky/aurora gradients — better than a single uniform sample.

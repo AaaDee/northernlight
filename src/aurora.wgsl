@@ -3,8 +3,7 @@
 // Each curtain is ONE soft ribbon: a smoothly waving lower edge, soft vertical
 // filaments, and a long upward fade — green body shading to pink at the top
 // edge (as in the reference photos). A height-dependent horizontal "flow" warps
-// each curtain so it sways as a single organic object. No hard edges, no
-// per-layer baseline streaks (which previously read as horizontal scan lines).
+// each curtain so it sways as a single organic object.
 // Foreground: dark mountain ridge with a row of pine-tree silhouettes.
 
 struct Uniforms {
@@ -22,6 +21,7 @@ struct VsOut {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+    // Writing a single triangle that covers the entire screen
     var out: VsOut;
     let x = f32((vi << 1u) & 2u);
     let y = f32(vi & 2u);
@@ -30,22 +30,38 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     return out;
 }
 
+// Cheap pseudo-rng based on positiont
 fn hash21(p_in: vec2<f32>) -> f32 {
     var p = fract(p_in * vec2<f32>(123.34, 456.21));
     p = p + dot(p, p + 45.32);
     return fract(p.x * p.y);
 }
 
+// Random gradient vector (components in [-1,1]) for a lattice point.
+fn hash22(p: vec2<f32>) -> vec2<f32> {
+    let q = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)),
+                      dot(p, vec2<f32>(269.5, 183.3)));
+    return -1.0 + 2.0 * fract(sin(q) * 43758.5453123);
+}
+
+// Gradient (Perlin) noise. Unlike value noise it pins the field to zero at the
+// lattice points and randomizes the gradient there, so features no longer line
+// up into visible grid rows/columns. Remapped to [0,1] to match the old range.
 fn noise2(p: vec2<f32>) -> f32 {
     let i = floor(p);
     let f = fract(p);
     // Quintic interpolant (C2-continuous) for smooth, crease-free noise.
-    let w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-    let a = hash21(i);
-    let b = hash21(i + vec2<f32>(1.0, 0.0));
-    let c = hash21(i + vec2<f32>(0.0, 1.0));
-    let d = hash21(i + vec2<f32>(1.0, 1.0));
-    return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let ga = hash22(i + vec2<f32>(0.0, 0.0));
+    let gb = hash22(i + vec2<f32>(1.0, 0.0));
+    let gc = hash22(i + vec2<f32>(0.0, 1.0));
+    let gd = hash22(i + vec2<f32>(1.0, 1.0));
+    let va = dot(ga, f - vec2<f32>(0.0, 0.0));
+    let vb = dot(gb, f - vec2<f32>(1.0, 0.0));
+    let vc = dot(gc, f - vec2<f32>(0.0, 1.0));
+    let vd = dot(gd, f - vec2<f32>(1.0, 1.0));
+    let n = va + u.x * (vb - va) + u.y * (vc - va) + u.x * u.y * (va - vb - vc + vd);
+    return 0.5 + 0.5 * n;
 }
 
 fn fbm2(p_in: vec2<f32>) -> f32 {
@@ -104,6 +120,7 @@ fn curtain(p: vec2<f32>, t: f32, seed: f32, baseEdge: f32, depth: f32) -> vec3<f
     let green = vec3<f32>(0.10, 1.0, 0.20);
     let lime = vec3<f32>(0.40, 1.0, 0.40);
     let pink = vec3<f32>(1.0, 0.30, 0.70);
+
     var col = mix(green, lime, smoothstep(0.0, 0.30, frac));
     col = mix(col, pink, 0.8 * smoothstep(0.5, 1.0, frac));
 
@@ -137,7 +154,7 @@ fn starfield(p: vec2<f32>, t: f32) -> vec3<f32> {
 // pointed at the top) for the classic conifer look.
 fn pines(x: f32) -> f32 {
     var top = 0.0;
-    for (var k = 0.0; k < 16.0; k = k + 1.0) {
+    for (var k = 0.0; k < 24.0; k = k + 1.0) {
         let cx = hash21(vec2<f32>(k, 1.0)) * 2.0;            // across screen (0..2)
         let h = 0.0375 + 0.025 * hash21(vec2<f32>(k, 2.0)); // tree height
         let w = 0.011 + 0.006 * hash21(vec2<f32>(k, 3.0)); // half-width at base
@@ -172,13 +189,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let p = vec2<f32>(in.uv.x * aspect, 1.0 - in.uv.y);
     let t = u.time;
 
-    // Near-black night sky (linear values; sRGB surface applies gamma).
-    let horizon = vec3<f32>(0.004, 0.008, 0.018);
-    let zenith = vec3<f32>(0.0, 0.001, 0.004);
+    // Night sky (linear values; sRGB surface applies gamma). Lifted off pure
+    // black so it survives the contrast curve and reads as a deep blue dusk.
+    let horizon = vec3<f32>(0.012, 0.022, 0.050);
+    let zenith = vec3<f32>(0.002, 0.006, 0.016);
     var col = mix(horizon, zenith, clamp(p.y, 0.0, 1.0));
 
     col = col + starfield(p, t);
-    col = col + aurora_sky(p, t);
+    col = col + aurora_sky(p, t) * 3.0;
 
     // Mountain ridge silhouette.
     let far = 0.10 + 0.04 * fbm2(vec2<f32>(p.x * 1.3 + 20.0, 0.0));
@@ -189,11 +207,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let trees = pines(p.x);
     let ground = max(ridge, trees);
     if (p.y < ground) {
-        col = vec3<f32>(0.0, 0.001, 0.002);
+        col = vec3<f32>(0.004, 0.008, 0.016);
     }
 
     // High-contrast exposure tonemap. Output is LINEAR (sRGB surface encodes).
     col = vec3<f32>(1.0) - exp(-col * 1.3);
+
+    // Contrast S-curve. Low pivot so the bright aurora gains punch without
+    // crushing the dark sky/ground down to flat black.
+    let contrast = 1.1;
+    let pivot = 0.25;
+    col = clamp((col - vec3<f32>(pivot)) * contrast + vec3<f32>(pivot), vec3<f32>(0.0), vec3<f32>(1.0));
 
     // Triangular-PDF dither (sum of two hashes) to break up 8-bit banding in
     // the smooth sky/aurora gradients — better than a single uniform sample.

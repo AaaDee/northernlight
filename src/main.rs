@@ -3,9 +3,10 @@ use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId};
+use winit::keyboard::{Key, NamedKey};
+use winit::window::{Fullscreen, Window, WindowId};
 
 /// Uniform block handed to the fragment shader each frame.
 /// Laid out to satisfy WGSL's 16-byte alignment rules.
@@ -24,6 +25,8 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    /// Max surface dimension the device supports; surfaces are clamped to this.
+    max_dim: u32,
     pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -53,11 +56,18 @@ impl Gpu {
         ))
         .expect("no suitable GPU adapter found");
 
+        // Start from the conservative downlevel defaults, but allow textures
+        // (and thus the swapchain surface) as large as the adapter supports so
+        // high-DPI / fullscreen displays wider than 2048 px work.
+        let mut limits = wgpu::Limits::downlevel_defaults();
+        limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
+        let max_dim = limits.max_texture_dimension_2d;
+
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: limits,
                 memory_hints: wgpu::MemoryHints::Performance,
             },
             None,
@@ -72,11 +82,12 @@ impl Gpu {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
+        
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width,
-            height,
+            width: width.min(max_dim),
+            height: height.min(max_dim),
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
@@ -159,6 +170,7 @@ impl Gpu {
             device,
             queue,
             config,
+            max_dim,
             pipeline,
             uniform_buffer,
             bind_group,
@@ -169,8 +181,8 @@ impl Gpu {
         if width == 0 || height == 0 {
             return;
         }
-        self.config.width = width;
-        self.config.height = height;
+        self.config.width = width.min(self.max_dim);
+        self.config.height = height.min(self.max_dim);
         self.surface.configure(&self.device, &self.config);
     }
 
@@ -242,7 +254,11 @@ impl ApplicationHandler for App {
         if self.gpu.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("northernlight");
+        // Borderless fullscreen on the current monitor: no title bar or
+        // decorations, covers the whole screen. `None` = current monitor.
+        let attrs = Window::default_attributes()
+            .with_title("northernlight")
+            .with_fullscreen(Some(Fullscreen::Borderless(None)));
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -263,6 +279,14 @@ impl ApplicationHandler for App {
         };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            // Escape quits — otherwise a borderless fullscreen window is hard
+            // to get out of.
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && event.logical_key == Key::Named(NamedKey::Escape) =>
+            {
+                event_loop.exit()
+            }
             WindowEvent::Resized(size) => gpu.resize(size.width, size.height),
             WindowEvent::RedrawRequested => {
                 let t = self

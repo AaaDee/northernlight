@@ -181,12 +181,18 @@ fn pines(x: f32) -> f32 {
     var top = 0.0;
     for (var k = 0.0; k < 24.0; k = k + 1.0) {
         let cx = hash21(vec2<f32>(k, 1.0)) * 2.0;            // across screen (0..2)
-        let h = 0.0375 + 0.025 * hash21(vec2<f32>(k, 2.0)); // tree height
         let w = 0.011 + 0.006 * hash21(vec2<f32>(k, 3.0)); // half-width at base
+        let d = abs(x - cx);
+        // Widest tier (s=0) has half-width w, and the trunk sits within w too,
+        // so a pixel farther than w from the trunk can't touch this tree. Skip
+        // it before paying for the (per-tree) ridge_height fbm evaluation.
+        if (d >= w) {
+            continue;
+        }
+        let h = 0.0375 + 0.025 * hash21(vec2<f32>(k, 2.0)); // tree height
         // Stand each tree on the ridge line at its position so small trees
         // still poke above the mountain silhouette.
         let base = ridge_height(cx) - 0.005;
-        let d = abs(x - cx);
 
         // Three overlapping tiers, each higher up and narrower than the last.
         for (var s = 0.0; s < 3.0; s = s + 1.0) {
@@ -219,10 +225,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     col = col + starfield(p, t);
     col = col + aurora_sky(p, t) * AURORA_GAIN;
 
-    // Mountain ridge with pine trees standing on it.
-    let ground = max(ridge_height(p.x), pines(p.x));
-    if (p.y < ground) {
-        col = GROUND_COLOR;
+    // Mountain ridge with pine trees standing on it. The ridge + trees never
+    // reach above ~0.2 in p.y, so skip the (expensive, many-octave fbm) ground
+    // evaluation entirely for the large majority of pixels that are pure sky.
+    if (p.y < 0.25) {
+        let ground = max(ridge_height(p.x), pines(p.x));
+        if (p.y < ground) {
+            col = GROUND_COLOR;
+        }
     }
 
     // High-contrast exposure tonemap. Output is LINEAR (sRGB surface encodes).
